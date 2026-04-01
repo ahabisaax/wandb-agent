@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+
+# W&B local run logs
+wandb/
+
+# Agent runtime data
+~/.wandb-agent/
+
+# Environment
+.env
+
+# macOS
+.DS_Store

@@ -1,0 +1,13 @@
+entity: your-wandb-entity
+projects:
+  - name: your-project
+    poll_interval_s: 45
+
+auto_relaunch: false          # set true only after testing
+daily_relaunch_limit: 3
+notify_slack_webhook: ""      # set to Slack webhook URL or leave empty
+
+anthropic_api_key: ""         # or set ANTHROPIC_API_KEY env var
+wandb_api_key: ""             # or set WANDB_API_KEY env var
+
+approval_server_port: 8765
