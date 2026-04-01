@@ -6,6 +6,8 @@ import logging
 import uuid
 from datetime import datetime
 
+import re
+
 import anthropic
 from openai import OpenAI
 
@@ -46,6 +48,15 @@ For suggested_diff, only include hyperparameters you recommend changing, e.g.:
 If past diagnoses are provided, take into account whether a previous fix was already tried.
 If the run is healthy, return status="ok", failure_mode="none", suggested_action="none".\
 """
+
+
+def _extract_json(text: str) -> str:
+    """Strip markdown code fences and extract the first JSON object found."""
+    # Remove ```json ... ``` or ``` ... ``` wrappers
+    text = re.sub(r"```(?:json)?\s*", "", text).strip()
+    # Find the first { ... } block
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    return match.group(0) if match else text
 
 
 def _fallback_diagnosis(run_id: str) -> Diagnosis:
@@ -117,7 +128,7 @@ class MonitorAgent:
                     response_text = self._call_ollama(user_message)
                 else:
                     response_text = self._call_anthropic(user_message)
-                parsed = json.loads(response_text)
+                parsed = json.loads(_extract_json(response_text))
                 return Diagnosis(
                     run_id=snapshot.run_id,
                     diagnosis_id=str(uuid.uuid4()),
