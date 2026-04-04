@@ -92,9 +92,9 @@ def monitor() -> None:
     """Start the polling loop (blocks until Ctrl-C)."""
     config = _load_config()
 
-    if not config.ollama_model and not config.anthropic_api_key:
+    if not config.ollama_model and not config.groq_model and not config.anthropic_api_key:
         typer.echo(
-            "ERROR: No LLM configured. Set ollama_model in config, or provide an anthropic_api_key.",
+            "ERROR: No LLM configured. Set ollama_model, groq_model, or anthropic_api_key in config.",
             err=True,
         )
         raise typer.Exit(1)
@@ -119,16 +119,38 @@ def monitor() -> None:
     project_names = [p.name for p in config.projects]
     poll_interval = config.projects[0].poll_interval_s if config.projects else 45
 
+    # Load training scripts per project (if configured)
+    script_contents: dict[str, str] = {}
+    for p in config.projects:
+        if p.training_script_path:
+            script_path = Path(p.training_script_path).expanduser()
+            if script_path.exists():
+                script_contents[p.name] = script_path.read_text()
+                logger.info("Loaded training script for '%s' from %s", p.name, script_path)
+            else:
+                logger.warning("Training script not found for '%s': %s", p.name, script_path)
+
     poller = WandbPoller(entity=config.entity, projects=project_names, poll_interval_s=poll_interval)
     agent = MonitorAgent(
         api_key=config.anthropic_api_key,
         ollama_model=config.ollama_model,
         ollama_base_url=config.ollama_base_url,
+        groq_api_key=config.groq_api_key,
+        groq_model=config.groq_model,
     )
     executor = ActionExecutor(config=config, store=store)
+    project_contexts: dict[str, str] = {}
+
+    if config.ollama_model:
+        llm_info = f"ollama / {config.ollama_model}"
+    elif config.groq_model:
+        llm_info = f"groq / {config.groq_model}"
+    else:
+        llm_info = f"anthropic / {agent.model}"
 
     typer.echo(
         f"Monitoring {len(project_names)} project(s) for entity '{config.entity}'. "
+        f"LLM: {llm_info}. "
         f"Approval server on port {config.approval_server_port}. Ctrl-C to stop."
     )
 
@@ -141,17 +163,29 @@ def monitor() -> None:
             snapshots = poller.poll()
 
             for snapshot in snapshots:
+                if snapshot.project not in project_contexts:
+                    project_contexts[snapshot.project] = agent.ensure_context(
+                        snapshot, script_contents.get(snapshot.project, "")
+                    )
+
                 past = store.get_past_diagnoses(snapshot.run_id)
-                diagnosis = agent.diagnose(snapshot, past)
+                diagnosis = agent.diagnose(snapshot, past, context=project_contexts[snapshot.project])
 
                 store.save_snapshot(snapshot)
                 store.save_diagnosis(diagnosis)
 
                 ts = datetime.now().strftime("%H:%M:%S")
-                print(
-                    f"[{ts}] [{snapshot.run_name}] {diagnosis.status.upper()}: "
-                    f"{diagnosis.failure_mode} ({diagnosis.confidence:.0%})"
-                )
+                if diagnosis.status == "ok":
+                    print(
+                        f"[{ts}] [{snapshot.run_name}] OK ({diagnosis.confidence:.0%}) — "
+                        f"{diagnosis.reasoning}"
+                    )
+                else:
+                    print(
+                        f"[{ts}] [{snapshot.run_name}] {diagnosis.status.upper()}: "
+                        f"{diagnosis.failure_mode} ({diagnosis.confidence:.0%}) — "
+                        f"{diagnosis.reasoning}"
+                    )
 
                 if diagnosis.status != "ok":
                     executor.execute(diagnosis, snapshot)

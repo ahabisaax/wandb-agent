@@ -5,6 +5,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 import re
 
@@ -14,6 +15,8 @@ from openai import OpenAI
 from wandb_agent.poller import Diagnosis, RunSnapshot
 
 logger = logging.getLogger(__name__)
+
+_CONTEXTS_DIR = Path.home() / ".wandb-agent" / "contexts"
 
 SYSTEM_PROMPT = """\
 You are an expert ML training monitor. You receive a snapshot of a live W&B
@@ -49,6 +52,21 @@ If past diagnoses are provided, take into account whether a previous fix was alr
 If the run is healthy, return status="ok", failure_mode="none", suggested_action="none".\
 """
 
+CONTEXT_GENERATION_PROMPT = """\
+You are an expert ML engineer. Based on the W&B run configuration, early training metrics,
+and optionally the training script below, generate a concise project context document in markdown.
+
+The document should cover:
+1. What is being trained (model type, task, dataset if apparent)
+2. Key hyperparameters and their current values
+3. What metrics are being tracked and what healthy progress looks like for this setup
+4. Specific failure modes or risks to watch for given this architecture and optimizer
+5. Any notable choices (e.g. scheduler, regularisation, loss function) that affect diagnosis
+
+Be specific and concise. This document will be prepended to an AI monitor's system prompt
+to help it give more accurate, project-specific diagnoses.\
+"""
+
 
 def _extract_json(text: str) -> str:
     """Strip markdown code fences and extract the first JSON object found."""
@@ -67,7 +85,7 @@ def _fallback_diagnosis(run_id: str) -> Diagnosis:
         status="ok",
         failure_mode="none",
         confidence=0.0,
-        reasoning="Could not parse Claude response; treating run as healthy to avoid false positives.",
+        reasoning="Could not parse LLM response; treating run as healthy to avoid false positives.",
         suggested_action="none",
         suggested_diff={},
         approved=None,
@@ -82,36 +100,125 @@ class MonitorAgent:
         model: str = "claude-sonnet-4-20250514",
         ollama_model: str = "",
         ollama_base_url: str = "http://localhost:11434/v1",
+        groq_api_key: str = "",
+        groq_model: str = "",
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.ollama_model = ollama_model
         self.ollama_base_url = ollama_base_url
+        self.groq_api_key = groq_api_key
+        self.groq_model = groq_model
 
-    def _call_ollama(self, user_message: str) -> str:
+    # ------------------------------------------------------------------
+    # LLM backends
+    # ------------------------------------------------------------------
+
+    def _call_llm(self, system: str, user_message: str) -> str:
+        """Route to the configured LLM backend."""
+        if self.ollama_model:
+            return self._call_ollama(system, user_message)
+        elif self.groq_model:
+            return self._call_groq(system, user_message)
+        else:
+            return self._call_anthropic(system, user_message)
+
+    def _call_ollama(self, system: str, user_message: str) -> str:
         client = OpenAI(base_url=self.ollama_base_url, api_key="ollama")
         response = client.chat.completions.create(
             model=self.ollama_model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system},
                 {"role": "user", "content": user_message},
             ],
             max_tokens=1024,
         )
         return response.choices[0].message.content or ""
 
-    def _call_anthropic(self, user_message: str) -> str:
+    def _call_groq(self, system: str, user_message: str) -> str:
+        logger.debug("Groq key in use: %s...%s", self.groq_api_key[:8], self.groq_api_key[-4:])
+        client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=self.groq_api_key)
+        response = client.chat.completions.create(
+            model=self.groq_model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_message},
+            ],
+            max_tokens=1024,
+        )
+        return response.choices[0].message.content or ""
+
+    def _call_anthropic(self, system: str, user_message: str) -> str:
         client = anthropic.Anthropic(api_key=self.api_key)
         response = client.messages.create(
             model=self.model,
             max_tokens=1024,
-            system=SYSTEM_PROMPT,
+            system=system,
             messages=[{"role": "user", "content": user_message}],
         )
         return next((b.text for b in response.content if b.type == "text"), "")
 
-    def diagnose(self, snapshot: RunSnapshot, past_diagnoses: list[Diagnosis]) -> Diagnosis:
+    # ------------------------------------------------------------------
+    # Project context
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def context_path(project: str) -> Path:
+        return _CONTEXTS_DIR / f"{project}.md"
+
+    @staticmethod
+    def context_exists(project: str) -> bool:
+        return MonitorAgent.context_path(project).exists()
+
+    @staticmethod
+    def load_context(project: str) -> str:
+        path = MonitorAgent.context_path(project)
+        return path.read_text() if path.exists() else ""
+
+    def generate_context(self, snapshot: RunSnapshot, script_content: str = "") -> str:
+        """Call the LLM to generate a project context document."""
+        user_message = (
+            f"Project: {snapshot.project}\n"
+            f"Run config: {json.dumps(snapshot.config, indent=2)}\n\n"
+            f"Early metrics (first {min(20, len(snapshot.history))} steps):\n"
+            f"{json.dumps(snapshot.history[:20], indent=2)}\n"
+        )
+        if script_content:
+            user_message += f"\nTraining script:\n```python\n{script_content}\n```"
+
+        return self._call_llm(CONTEXT_GENERATION_PROMPT, user_message)
+
+    def ensure_context(self, snapshot: RunSnapshot, script_content: str = "") -> str:
+        """Return the project context, generating and saving it if it doesn't exist yet."""
+        if self.context_exists(snapshot.project):
+            return self.load_context(snapshot.project)
+
+        logger.info("Generating project context for '%s'...", snapshot.project)
+        try:
+            context = self.generate_context(snapshot, script_content)
+            _CONTEXTS_DIR.mkdir(parents=True, exist_ok=True)
+            self.context_path(snapshot.project).write_text(context)
+            logger.info("Saved project context to %s", self.context_path(snapshot.project))
+            return context
+        except Exception as exc:
+            logger.warning("Could not generate project context: %s", exc)
+            return ""
+
+    # ------------------------------------------------------------------
+    # Diagnosis
+    # ------------------------------------------------------------------
+
+    def diagnose(
+        self,
+        snapshot: RunSnapshot,
+        past_diagnoses: list[Diagnosis],
+        context: str = "",
+    ) -> Diagnosis:
         """Call the configured LLM to diagnose a run snapshot. Retries once on parse failure."""
+        system = SYSTEM_PROMPT
+        if context:
+            system = f"## Project Context\n\n{context}\n\n---\n\n{SYSTEM_PROMPT}"
+
         user_message = (
             f"Run name: {snapshot.run_name}\n"
             f"Run ID: {snapshot.run_id}\n"
@@ -124,10 +231,7 @@ class MonitorAgent:
 
         for attempt in range(2):
             try:
-                if self.ollama_model:
-                    response_text = self._call_ollama(user_message)
-                else:
-                    response_text = self._call_anthropic(user_message)
+                response_text = self._call_llm(system, user_message)
                 parsed = json.loads(_extract_json(response_text))
                 return Diagnosis(
                     run_id=snapshot.run_id,

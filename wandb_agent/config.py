@@ -11,6 +11,7 @@ from pydantic import BaseModel, model_validator
 class ProjectConfig(BaseModel):
     name: str
     poll_interval_s: int = 45
+    training_script_path: str = ""
 
 
 class AgentConfig(BaseModel):
@@ -24,6 +25,8 @@ class AgentConfig(BaseModel):
     approval_server_port: int = 8765
     ollama_model: str = ""
     ollama_base_url: str = "http://localhost:11434/v1"
+    groq_api_key: str = ""
+    groq_model: str = ""
 
     @model_validator(mode="after")
     def apply_env_overrides(self) -> "AgentConfig":
@@ -33,6 +36,9 @@ class AgentConfig(BaseModel):
         env_wandb = os.environ.get("WANDB_API_KEY")
         if env_wandb:
             self.wandb_api_key = env_wandb
+        env_groq = os.environ.get("GROQ_API_KEY")
+        if env_groq:
+            self.groq_api_key = env_groq
         return self
 
     @classmethod

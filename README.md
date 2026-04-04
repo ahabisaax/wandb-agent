@@ -1,6 +1,6 @@
 # wandb-agent
 
-A lightweight agent that watches your Weights & Biases training runs and uses an LLM to diagnose problems online. When something looks wrong  (e.g. diverging loss, exploding gradients, overfitting) it tells you, and optionally stops and relaunches the run with a patched config.
+A lightweight agent that watches your Weights & Biases training runs and uses an LLM to diagnose problems online. When something looks wrong (e.g. diverging loss, exploding gradients, overfitting) it tells you, and optionally stops and relaunches the run with a patched config.
 
 It runs on your machine alongside your training jobs.
 
@@ -25,9 +25,12 @@ The relaunch step requires explicit approval and is off by default. You can appr
 | Backend | How to configure |
 |---|---|
 | Ollama (local) | Set `ollama_model` in config, run `ollama serve` |
-| Anthropic (Claude) | Set `anthropic_api_key` in config or via env var |
+| Groq (free API) | Set `groq_model` and `groq_api_key` in config, or set `GROQ_API_KEY` env var |
+| Anthropic (Claude) | Set `anthropic_api_key` in config or set `ANTHROPIC_API_KEY` env var |
 
-Ollama is the easiest way to get started for free. `llama3.2` works well for this task.
+Priority: **Ollama > Groq > Anthropic**. The first configured backend wins.
+
+Ollama is the easiest way to get started locally. Groq is the easiest free cloud option — sign up at [console.groq.com](https://console.groq.com) and use `llama-3.3-70b-versatile`.
 
 ---
 
@@ -48,7 +51,7 @@ cp config.example.yaml ~/.wandb-agent/config.yaml
 $EDITOR ~/.wandb-agent/config.yaml
 ```
 
-Minimum fields:
+Minimum config:
 
 ```yaml
 entity: your-wandb-entity
@@ -58,8 +61,10 @@ projects:
 
 wandb_api_key: ""   # or set WANDB_API_KEY env var
 
-# pick one:
+# pick one backend:
 ollama_model: "llama3.2"
+# groq_model: "llama-3.3-70b-versatile"
+# groq_api_key: ""       # or set GROQ_API_KEY env var
 # anthropic_api_key: ""  # or set ANTHROPIC_API_KEY env var
 ```
 
@@ -68,6 +73,53 @@ Optional Slack notifications:
 ```yaml
 notify_slack_webhook: "https://hooks.slack.com/services/..."
 ```
+
+---
+
+## Connecting to a training repo
+
+Your training script just needs `wandb.log()` calls — the agent never touches your code directly. It only reads from W&B's API.
+
+```python
+import wandb
+wandb.init(project="my-project")  # must match `name` in config.yaml
+
+# inside your training loop
+wandb.log({"loss": loss, "val_loss": val_loss, "lr": lr, "grad_norm": grad_norm})
+```
+
+Then start your training and the agent in separate terminals:
+
+```bash
+# Terminal 1
+python train.py
+
+# Terminal 2
+wandb-agent monitor
+```
+
+---
+
+## Project context
+
+On the first run for each project, the agent automatically generates a context document at `~/.wandb-agent/contexts/<project>.md`. This is produced by the LLM from your run config, early metrics, and optionally your training script. It gets prepended to the diagnosis system prompt so the model understands your specific setup — architecture, optimizer, expected metric behaviour — rather than reasoning generically.
+
+To include your training script in context generation, set `training_script_path` in your project config:
+
+```yaml
+projects:
+  - name: my-project
+    poll_interval_s: 30
+    training_script_path: "~/path/to/train.py"
+```
+
+To regenerate the context (e.g. after changing your model or optimizer):
+
+```bash
+rm ~/.wandb-agent/contexts/my-project.md
+```
+
+It will be regenerated on the next poll cycle.
 
 ---
 
@@ -85,7 +137,11 @@ Then start the agent:
 wandb-agent monitor
 ```
 
-This blocks and polls continuously. Ctrl-C to stop cleanly.
+This blocks and polls continuously. The startup line tells you which LLM backend is active:
+
+```
+Monitoring 1 project(s) for entity 'you'. LLM: groq / llama-3.3-70b-versatile. Approval server on port 8765. Ctrl-C to stop.
+```
 
 ---
 
@@ -143,16 +199,19 @@ Safety limits (always enforced, regardless of config):
 entity: your-wandb-entity
 projects:
   - name: your-project
-    poll_interval_s: 45        # polling frequency in seconds
+    poll_interval_s: 45           # polling frequency in seconds
+    training_script_path: ""      # optional path to train.py for context generation
 
-auto_relaunch: false           # set true only after testing
-daily_relaunch_limit: 3        # max relaunches across all runs per 24h
-notify_slack_webhook: ""       # Slack incoming webhook URL
+auto_relaunch: false              # set true only after testing
+daily_relaunch_limit: 3           # max relaunches across all runs per 24h
+notify_slack_webhook: ""          # Slack incoming webhook URL
 
-anthropic_api_key: ""          # or ANTHROPIC_API_KEY env var
-wandb_api_key: ""              # or WANDB_API_KEY env var
+anthropic_api_key: ""             # or ANTHROPIC_API_KEY env var
+groq_api_key: ""                  # or GROQ_API_KEY env var
+groq_model: ""                    # e.g. llama-3.3-70b-versatile
+wandb_api_key: ""                 # or WANDB_API_KEY env var
 
-ollama_model: ""               # e.g. llama3.2 — takes priority over Anthropic if set
+ollama_model: ""                  # e.g. llama3.2 — takes priority over all if set
 ollama_base_url: "http://localhost:11434/v1"
 
 approval_server_port: 8765
@@ -175,9 +234,16 @@ pytest tests/ -v
 wandb_agent/
 ├── config.py     — AgentConfig pydantic model
 ├── poller.py     — RunSnapshot + Diagnosis models, WandbPoller
-├── agent.py      — MonitorAgent (Ollama or Claude diagnosis)
+├── agent.py      — MonitorAgent (LLM diagnosis + project context generation)
 ├── store.py      — SQLite persistence (~/.wandb-agent/store.db)
 ├── executor.py   — ActionExecutor (notify / patch / relaunch)
 ├── approval.py   — FastAPI approval server (port 8765)
 └── cli.py        — Typer CLI commands
+
+~/.wandb-agent/
+├── config.yaml         — your configuration
+├── store.db            — SQLite history of snapshots and diagnoses
+├── contexts/           — auto-generated per-project context documents
+│   └── <project>.md
+└── patches/            — suggested config diffs written on patch_config action
 ```
