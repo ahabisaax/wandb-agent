@@ -1,6 +1,6 @@
 # wandb-agent
 
-A lightweight agent that watches your Weights & Biases training runs and uses an LLM to diagnose problems as they happen. When something looks wrong  (e.g. diverging loss, exploding gradients, overfitting) it tells you, and optionally stops and relaunches the run with a patched config.
+A lightweight agent that watches your Weights & Biases training runs and uses an LLM to diagnose problems online. When something looks wrong  (e.g. diverging loss, exploding gradients, overfitting) it tells you, and optionally stops and relaunches the run with a patched config.
 
 It runs on your machine alongside your training jobs.
 
