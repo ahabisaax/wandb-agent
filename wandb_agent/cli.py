@@ -139,7 +139,16 @@ def monitor() -> None:
         groq_model=config.groq_model,
     )
     executor = ActionExecutor(config=config, store=store)
+
+    # Pre-generate contexts for projects that have a training script
     project_contexts: dict[str, str] = {}
+    for p in config.projects:
+        if script_contents.get(p.name) and not agent.context_exists(p.name):
+            project_contexts[p.name] = agent.ensure_context(
+                p.name, script_content=script_contents[p.name]
+            )
+        elif agent.context_exists(p.name):
+            project_contexts[p.name] = agent.load_context(p.name)
 
     if config.ollama_model:
         llm_info = f"ollama / {config.ollama_model}"
@@ -165,7 +174,9 @@ def monitor() -> None:
             for snapshot in snapshots:
                 if snapshot.project not in project_contexts:
                     project_contexts[snapshot.project] = agent.ensure_context(
-                        snapshot, script_contents.get(snapshot.project, "")
+                        snapshot.project,
+                        script_content=script_contents.get(snapshot.project, ""),
+                        snapshot=snapshot,
                     )
 
                 past = store.get_past_diagnoses(snapshot.run_id)

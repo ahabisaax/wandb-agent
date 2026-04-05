@@ -95,15 +95,11 @@ class WandbPoller:
 
     def _snapshot_run(self, run: object, project: str) -> RunSnapshot:
         try:
-            history_df = run.history(  # type: ignore[attr-defined]
+            history_records = run.history(  # type: ignore[attr-defined]
                 samples=200,
-                keys=["loss", "val_loss", "grad_norm", "lr", "epoch"],
+                pandas=False,
             )
-            history_records: list[dict] = (
-                history_df.to_dict(orient="records")
-                if hasattr(history_df, "to_dict")
-                else []
-            )
+            history_records = [dict(row) for row in history_records]
         except Exception:
             logger.debug("Could not fetch history for run %s", run.id, exc_info=True)  # type: ignore[attr-defined]
             history_records = []

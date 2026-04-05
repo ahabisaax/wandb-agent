@@ -26,10 +26,8 @@ class ActionExecutor:
         action = diagnosis.suggested_action
         if action == "notify":
             self._notify(diagnosis, snapshot)
-        elif action == "patch_config":
-            self._patch_config(diagnosis, snapshot)
-        elif action == "stop_and_relaunch":
-            # Notify user to approve; actual relaunch happens after approval
+        elif action in ("patch_config", "stop_and_relaunch"):
+            # All config changes and relaunches require explicit user approval
             self._notify_pending_approval(diagnosis, snapshot)
 
     # ------------------------------------------------------------------
@@ -141,12 +139,18 @@ class ActionExecutor:
             )
             return
 
-        # Stop the run
+        # Check current run state before acting
         try:
             import wandb  # noqa: PLC0415
 
             api = wandb.Api()
             run = api.run(f"{snapshot.entity}/{snapshot.project}/{snapshot.run_id}")
+            if run.state != "running":
+                logger.info(
+                    "Run %s is no longer running (state: %s); skipping relaunch",
+                    snapshot.run_id, run.state,
+                )
+                return
             run.stop()
             logger.info("Stopped run %s", snapshot.run_id)
         except Exception as exc:

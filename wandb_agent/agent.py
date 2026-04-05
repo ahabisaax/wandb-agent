@@ -32,13 +32,21 @@ Return ONLY a valid JSON object with these exact fields:
   "suggested_diff": {}
 }
 
-Diagnosis rubric:
-- diverging: training loss increasing monotonically for >20 steps → reduce LR 5-10x, check grad clipping
-- nan_inf: loss is NaN or inf → enable grad clipping, check log(0), reduce LR
-- plateau: val_loss flat for >50 steps, not near target → LR decay, check data pipeline
-- overfitting: train loss falling while val_loss rising for >30 steps → increase regularisation
-- grad_explosion: grad_norm >100 and increasing → add/reduce clip_grad_norm threshold
-- lr_too_low: loss decreasing very slowly vs early rate → increase LR or use warmup
+IMPORTANT rules:
+- Base your diagnosis ONLY on observed metric trends in the history. Never flag a hyperparameter
+  value as suspicious just because it looks unusual — only diagnose a problem if the metrics
+  actually show it happening.
+- If the history is short (<20 steps) or metrics look normal, return status="ok".
+- failure_mode MUST be exactly one of: none, diverging, plateau, overfitting, grad_explosion,
+  lr_too_low, nan_inf. No other values are valid.
+
+Diagnosis rubric (only apply if metrics clearly show the pattern):
+- diverging: training loss increasing monotonically for >20 steps
+- nan_inf: loss is NaN or inf
+- plateau: val_loss flat for >50 steps and not near a reasonable target
+- overfitting: train loss falling while val_loss rising consistently for >30 steps
+- grad_explosion: grad_norm >100 and increasing over multiple steps
+- lr_too_low: loss decreasing extremely slowly compared to the early rate of improvement
 
 Action thresholds:
 - suggested_action="notify" if confidence >= 0.5
@@ -97,7 +105,7 @@ class MonitorAgent:
     def __init__(
         self,
         api_key: str = "",
-        model: str = "claude-sonnet-4-20250514",
+        model: str = "claude-opus-4-6",
         ollama_model: str = "",
         ollama_base_url: str = "http://localhost:11434/v1",
         groq_api_key: str = "",
@@ -114,17 +122,18 @@ class MonitorAgent:
     # LLM backends
     # ------------------------------------------------------------------
 
-    def _call_llm(self, system: str, user_message: str) -> str:
+    def _call_llm(self, system: str, user_message: str, json_mode: bool = False) -> str:
         """Route to the configured LLM backend."""
         if self.ollama_model:
-            return self._call_ollama(system, user_message)
+            return self._call_ollama(system, user_message, json_mode=json_mode)
         elif self.groq_model:
-            return self._call_groq(system, user_message)
+            return self._call_groq(system, user_message, json_mode=json_mode)
         else:
             return self._call_anthropic(system, user_message)
 
-    def _call_ollama(self, system: str, user_message: str) -> str:
+    def _call_ollama(self, system: str, user_message: str, json_mode: bool = False) -> str:
         client = OpenAI(base_url=self.ollama_base_url, api_key="ollama")
+        kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
         response = client.chat.completions.create(
             model=self.ollama_model,
             messages=[
@@ -132,12 +141,14 @@ class MonitorAgent:
                 {"role": "user", "content": user_message},
             ],
             max_tokens=1024,
+            **kwargs,
         )
         return response.choices[0].message.content or ""
 
-    def _call_groq(self, system: str, user_message: str) -> str:
+    def _call_groq(self, system: str, user_message: str, json_mode: bool = False) -> str:
         logger.debug("Groq key in use: %s...%s", self.groq_api_key[:8], self.groq_api_key[-4:])
         client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=self.groq_api_key)
+        kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
         response = client.chat.completions.create(
             model=self.groq_model,
             messages=[
@@ -145,6 +156,7 @@ class MonitorAgent:
                 {"role": "user", "content": user_message},
             ],
             max_tokens=1024,
+            **kwargs,
         )
         return response.choices[0].message.content or ""
 
@@ -175,30 +187,41 @@ class MonitorAgent:
         path = MonitorAgent.context_path(project)
         return path.read_text() if path.exists() else ""
 
-    def generate_context(self, snapshot: RunSnapshot, script_content: str = "") -> str:
+    def generate_context(
+        self,
+        project: str,
+        script_content: str = "",
+        snapshot: RunSnapshot | None = None,
+    ) -> str:
         """Call the LLM to generate a project context document."""
-        user_message = (
-            f"Project: {snapshot.project}\n"
-            f"Run config: {json.dumps(snapshot.config, indent=2)}\n\n"
-            f"Early metrics (first {min(20, len(snapshot.history))} steps):\n"
-            f"{json.dumps(snapshot.history[:20], indent=2)}\n"
-        )
+        user_message = f"Project: {project}\n"
+        if snapshot:
+            user_message += (
+                f"Run config: {json.dumps(snapshot.config, indent=2)}\n\n"
+                f"Early metrics (first {min(20, len(snapshot.history))} steps):\n"
+                f"{json.dumps(snapshot.history[:20], indent=2)}\n"
+            )
         if script_content:
             user_message += f"\nTraining script:\n```python\n{script_content}\n```"
 
         return self._call_llm(CONTEXT_GENERATION_PROMPT, user_message)
 
-    def ensure_context(self, snapshot: RunSnapshot, script_content: str = "") -> str:
+    def ensure_context(
+        self,
+        project: str,
+        script_content: str = "",
+        snapshot: RunSnapshot | None = None,
+    ) -> str:
         """Return the project context, generating and saving it if it doesn't exist yet."""
-        if self.context_exists(snapshot.project):
-            return self.load_context(snapshot.project)
+        if self.context_exists(project):
+            return self.load_context(project)
 
-        logger.info("Generating project context for '%s'...", snapshot.project)
+        logger.info("Generating project context for '%s'...", project)
         try:
-            context = self.generate_context(snapshot, script_content)
+            context = self.generate_context(project, script_content, snapshot)
             _CONTEXTS_DIR.mkdir(parents=True, exist_ok=True)
-            self.context_path(snapshot.project).write_text(context)
-            logger.info("Saved project context to %s", self.context_path(snapshot.project))
+            self.context_path(project).write_text(context)
+            logger.info("Saved project context to %s", self.context_path(project))
             return context
         except Exception as exc:
             logger.warning("Could not generate project context: %s", exc)
@@ -231,7 +254,8 @@ class MonitorAgent:
 
         for attempt in range(2):
             try:
-                response_text = self._call_llm(system, user_message)
+                response_text = self._call_llm(system, user_message, json_mode=True)
+                logger.debug("LLM raw response: %s", response_text)
                 parsed = json.loads(_extract_json(response_text))
                 return Diagnosis(
                     run_id=snapshot.run_id,
