@@ -13,10 +13,10 @@ Every poll cycle (default: 45 seconds), the agent fetches all running W&B runs i
 Depending on confidence:
 
 - **>= 50% confidence** — sends you a notification (Slack or logs)
-- **>= 70% confidence** — writes a patched config YAML to `~/.wandb-agent/patches/`
-- **>= 90% confidence** — asks for your approval to stop the run and relaunch it with the fix applied
+- **>= 70% confidence** — notifies you and asks for approval to apply a config patch
+- **>= 90% confidence** — notifies you and asks for approval to stop the run and relaunch with the fix applied
 
-The relaunch step requires explicit approval and is off by default. You can approve via the CLI or a local HTTP endpoint.
+All config changes and relaunches require explicit user approval. Nothing is applied automatically.
 
 ---
 
@@ -102,9 +102,9 @@ wandb-agent monitor
 
 ## Project context
 
-On the first run for each project, the agent automatically generates a context document at `~/.wandb-agent/contexts/<project>.md`. This is produced by the LLM from your run config, early metrics, and optionally your training script. It gets prepended to the diagnosis system prompt so the model understands your specific setup — architecture, optimizer, expected metric behaviour — rather than reasoning generically.
+At startup, the agent automatically generates a context document at `~/.wandb-agent/contexts/<project>.md` for each project that has a `training_script_path` configured. This is produced by the LLM from your training script and gets prepended to the diagnosis system prompt so the model understands your specific setup — architecture, optimizer, expected metric behaviour — rather than reasoning generically.
 
-To include your training script in context generation, set `training_script_path` in your project config:
+To enable context generation, set `training_script_path` in your project config:
 
 ```yaml
 projects:
@@ -113,13 +113,13 @@ projects:
     training_script_path: "~/path/to/train.py"
 ```
 
-To regenerate the context (e.g. after changing your model or optimizer):
+The context is generated once and reused on subsequent runs. To regenerate (e.g. after changing your model or optimizer):
 
 ```bash
 rm ~/.wandb-agent/contexts/my-project.md
 ```
 
-It will be regenerated on the next poll cycle.
+It will be regenerated on the next agent startup.
 
 ---
 
@@ -190,6 +190,7 @@ Safety limits (always enforced, regardless of config):
 - Max 3 relaunches per run total
 - Max `daily_relaunch_limit` relaunches across all runs per 24 hours (default: 3)
 - `launch_cmd` must be present in the run's W&B config
+- If the run finishes naturally between diagnosis and approval, the relaunch is skipped gracefully
 
 ---
 
