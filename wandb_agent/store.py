@@ -120,6 +120,14 @@ class RunStore:
                 ),
             )
 
+    def get_diagnosis(self, diagnosis_id: str) -> Diagnosis | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT diagnosis_json FROM diagnoses WHERE diagnosis_id = ?",
+                (diagnosis_id,),
+            ).fetchone()
+        return Diagnosis.model_validate_json(row["diagnosis_json"]) if row else None
+
     def get_past_diagnoses(self, run_id: str, limit: int = 10) -> list[Diagnosis]:
         with self._connect() as conn:
             rows = conn.execute(

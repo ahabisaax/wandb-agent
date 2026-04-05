@@ -12,6 +12,7 @@ class ProjectConfig(BaseModel):
     name: str
     poll_interval_s: int = 45
     training_script_path: str = ""
+    project_root: str = ""  # root directory to run Claude Code in for fix command
 
 
 class AgentConfig(BaseModel):

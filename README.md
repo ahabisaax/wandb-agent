@@ -150,10 +150,11 @@ Monitoring 1 project(s) for entity 'you'. LLM: groq / llama-3.3-70b-versatile. A
 ```bash
 wandb-agent monitor                        # start the polling loop
 wandb-agent status                         # latest diagnosis per tracked run
-wandb-agent pending                        # list runs awaiting relaunch approval
+wandb-agent pending                        # list runs awaiting approval
 wandb-agent approve <diagnosis_id>         # approve a stop-and-relaunch
 wandb-agent reject <diagnosis_id>          # reject it, optionally with a reason
 wandb-agent reject <diagnosis_id> --reason "False positive"
+wandb-agent fix <diagnosis_id>             # invoke Claude Code to fix the diagnosed issue
 ```
 
 Approvals can also be sent over HTTP while the agent is running:
@@ -162,6 +163,32 @@ Approvals can also be sent over HTTP while the agent is running:
 curl -X POST http://localhost:8765/approve/<diagnosis_id>
 curl -X POST "http://localhost:8765/reject/<diagnosis_id>?reason=False+positive"
 curl http://localhost:8765/pending
+```
+
+---
+
+## Fixing issues with Claude Code
+
+When the agent diagnoses a problem, you can hand it off directly to Claude Code to propose a fix:
+
+```bash
+wandb-agent fix <diagnosis_id>
+```
+
+This invokes Claude Code in your project directory with full context:
+- The diagnosis (failure mode, reasoning, suggested diff)
+- The W&B run config
+- The project context document
+- The path to your training script
+
+Claude Code then investigates and proposes the appropriate fix — whether that's a hyperparameter change in your experiment config, a code fix in your training script, or something else. You review and approve the diff before anything is applied.
+
+To enable this, set `project_root` in your project config:
+
+```yaml
+projects:
+  - name: my-project
+    project_root: "~/path/to/your/training/repo"
 ```
 
 ---
@@ -202,6 +229,7 @@ projects:
   - name: your-project
     poll_interval_s: 45           # polling frequency in seconds
     training_script_path: ""      # optional path to train.py for context generation
+    project_root: ""              # project directory for Claude Code fix invocation
 
 auto_relaunch: false              # set true only after testing
 daily_relaunch_limit: 3           # max relaunches across all runs per 24h

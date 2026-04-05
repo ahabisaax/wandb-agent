@@ -259,5 +259,73 @@ def status() -> None:
             )
 
 
+@app.command()
+def fix(diagnosis_id: str) -> None:
+    """Invoke Claude Code to fix the issue identified in a diagnosis."""
+    import subprocess  # noqa: PLC0415
+
+    store = RunStore()
+    diagnosis = store.get_diagnosis(diagnosis_id)
+    if not diagnosis:
+        typer.echo(f"Diagnosis {diagnosis_id} not found.", err=True)
+        raise typer.Exit(1)
+
+    run_info = store.get_run_info(diagnosis.run_id)
+    config = _load_config()
+
+    # Find project config for this diagnosis
+    project_cfg = next(
+        (p for p in config.projects if p.name == (run_info or {}).get("project", "")),
+        None,
+    )
+
+    # Build context for Claude Code
+    diff_str = json.dumps(diagnosis.suggested_diff, indent=2) if diagnosis.suggested_diff else "{}"
+    run_config_str = json.dumps(json.loads(run_info["config_json"]), indent=2) if run_info else "{}"
+
+    context_path = MonitorAgent.context_path((run_info or {}).get("project", ""))
+    project_context = context_path.read_text() if context_path.exists() else ""
+
+    prompt_parts = [
+        "The W&B monitoring agent has diagnosed a problem with a training run.",
+        "",
+        f"## Diagnosis",
+        f"- Failure mode: {diagnosis.failure_mode}",
+        f"- Confidence: {diagnosis.confidence:.0%}",
+        f"- Reasoning: {diagnosis.reasoning}",
+        f"- Suggested changes: {diff_str}",
+        "",
+        f"## Run config",
+        f"```json\n{run_config_str}\n```",
+    ]
+
+    if project_context:
+        prompt_parts += ["", "## Project context", project_context]
+
+    if project_cfg and project_cfg.training_script_path:
+        prompt_parts += [
+            "",
+            f"## Training script",
+            f"Located at: {project_cfg.training_script_path}",
+        ]
+
+    prompt_parts += [
+        "",
+        "Please investigate the issue and propose the appropriate fix — this may be a config "
+        "change, a hyperparameter adjustment, or a code fix in the training script. "
+        "Show what you intend to change before making any edits.",
+    ]
+
+    prompt = "\n".join(prompt_parts)
+
+    # Determine working directory
+    cwd = None
+    if project_cfg and project_cfg.project_root:
+        cwd = str(Path(project_cfg.project_root).expanduser())
+
+    typer.echo(f"Invoking Claude Code for diagnosis {diagnosis_id}...")
+    subprocess.run(["claude", prompt], cwd=cwd)
+
+
 if __name__ == "__main__":
     app()
